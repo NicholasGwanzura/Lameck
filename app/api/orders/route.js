@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { getDb } from '../../../lib/db'
+import { hasAdminSession } from '../../../lib/admin-auth'
 import config from '../../../data/store-config.json'
 
 const productsFile = path.join(process.cwd(), 'data/products.json')
@@ -33,12 +34,46 @@ function createOrder(lines, customer) {
 }
 
 export async function GET() {
+  if (!(await hasAdminSession())) return NextResponse.json({ error: 'Admin sign-in required.' }, { status: 401 })
   const db = getDb()
   if (db) {
     const result = await db.query('SELECT id,status,currency,total,customer,items,created_at AS "createdAt" FROM orders ORDER BY created_at DESC')
     return NextResponse.json({ orders: result.rows })
   }
   return NextResponse.json({ orders: JSON.parse(await fs.readFile(ordersFile, 'utf8')) })
+}
+
+export async function PATCH(request) {
+  if (!(await hasAdminSession())) return NextResponse.json({ error: 'Admin sign-in required.' }, { status: 401 })
+
+  let input
+  try {
+    input = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Send a valid order update.' }, { status: 400 })
+  }
+
+  const allowedStatuses = new Set(['pending_payment', 'processing', 'shipped', 'completed'])
+  if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.id !== 'string' || !input.id.trim()) {
+    return NextResponse.json({ error: 'An order ID is required.' }, { status: 400 })
+  }
+  if (!allowedStatuses.has(input.status)) {
+    return NextResponse.json({ error: 'Choose a supported order status.' }, { status: 400 })
+  }
+
+  const db = getDb()
+  if (db) {
+    const result = await db.query('UPDATE orders SET status=$1 WHERE id=$2 RETURNING id,status', [input.status, input.id])
+    if (!result.rowCount) return NextResponse.json({ error: 'Order not found.' }, { status: 404 })
+    return NextResponse.json({ order: result.rows[0] })
+  }
+
+  const orders = JSON.parse(await fs.readFile(ordersFile, 'utf8'))
+  const order = orders.find((item) => item.id === input.id)
+  if (!order) return NextResponse.json({ error: 'Order not found.' }, { status: 404 })
+  order.status = input.status
+  await fs.writeFile(ordersFile, JSON.stringify(orders, null, 2))
+  return NextResponse.json({ order })
 }
 
 export async function POST(request) {
